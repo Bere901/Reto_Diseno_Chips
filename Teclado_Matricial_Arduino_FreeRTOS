@@ -1,0 +1,393 @@
+#include <Arduino_FreeRTOS.h>
+//uso de semáforos y la interrupción externa
+#include "semphr.h"
+
+//macros para la configuración y manejo de pines
+#define MakeInputPin(REG, PIN)       (REG &= (~(1 << PIN)))
+#define MakeOutputPin(REG, PIN)      (REG |= (1 << PIN))
+#define EnablePullUp(REG, PIN)       (REG |= (1 << PIN))
+#define ReadInputPin(REG, PIN)       (REG & (1 << PIN))
+#define WriteOutputPinLow(REG, PIN)  (REG &= ~(1 << PIN))
+#define WriteOutputPinHigh(REG, PIN) (REG |= (1 << PIN))
+#define ToggleOutputPin(REG, PIN)    (REG ^= (1 << PIN))
+
+//declaraciones de la tasa de comunicación serial
+#define F_CPU 16000000UL
+#define USART_BAUDRATE 19200
+#define UBRR_VALUE (((F_CPU / (USART_BAUDRATE * 16UL))) - 1)
+
+//semaphore handle 1
+SemaphoreHandle_t interruptSemaphore1;
+
+//semaphore handle 2
+SemaphoreHandle_t interruptSemaphore2;
+
+//semaphore handle 3
+SemaphoreHandle_t interruptSemaphore3;
+
+//semaphore handle 4
+SemaphoreHandle_t interruptSemaphore4;
+
+//nf = a barrido de renglones
+uint8_t nf = 0;
+// t = a la tecla que se presiona
+char t; 
+
+//retardo en ms
+const unsigned int period = 24;
+
+//buffer para el UART
+unsigned char mybuffer[25];
+
+void setup()
+{
+  //creación de tareas
+  xTaskCreate(vTaskCERO,"CERO",100,NULL,1,NULL);
+  xTaskCreate(vHandlerL1,"COLUMNA1",100,NULL,1,NULL);
+  xTaskCreate(vHandlerL2,"COLUMNA2",100,NULL,1,NULL);
+  xTaskCreate(vHandlerL3,"COLUMNA3",100,NULL,1,NULL);
+  xTaskCreate(vHandlerL4,"COLUMNA4",100,NULL,1,NULL);
+  
+  //configuración del puerto serial
+  UBRR0H = (uint8_t)(UBRR_VALUE >> 8);
+  UBRR0L = (uint8_t)UBRR_VALUE;
+  UCSR0C = 0x06;       // Set frame format: 8data, 1stop bit 
+  UCSR0B |= (1 << RXEN0) | (1 << TXEN0);   // TX y RX habilitados
+
+  // Renglones en alta impedancia
+  MakeInputPin(DDRB, PB3); WriteOutputPinHigh(PORTB, PB3); //RENGLON 1
+  MakeInputPin(DDRB, PB2); WriteOutputPinHigh(PORTB, PB2); //RENGLON 2
+  MakeInputPin(DDRB, PB1); WriteOutputPinHigh(PORTB, PB1); //RENGLON 3
+  MakeInputPin(DDRB, PB0); WriteOutputPinHigh(PORTB, PB0); //RENGLON 4
+  
+  // Columnas en pullup
+  MakeInputPin(DDRD, PD2); EnablePullUp(PORTD, PD2); //COLUMNA 1
+  MakeInputPin(DDRD, PD3); EnablePullUp(PORTD, PD3); //COLUMNA 2
+  MakeInputPin(DDRD, PD7); EnablePullUp(PORTD, PD7); //COLUMNA 3
+  MakeInputPin(DDRB, PB4); EnablePullUp(PORTB, PB4); //COLUMNA 4
+
+  //creación del semáforo binario 1
+  interruptSemaphore1 = xSemaphoreCreateBinary();
+
+  //creación del semáforo binario 2
+  interruptSemaphore2 = xSemaphoreCreateBinary();
+
+  //creación del semáforo binario 3
+  interruptSemaphore3 = xSemaphoreCreateBinary();
+
+  //creación del semáforo binario 4
+  interruptSemaphore4 = xSemaphoreCreateBinary();
+
+//INT SEMAFORO 1
+  //si el semáforo es creado, inicializa interrupción INT0 (PD2)
+  if(interruptSemaphore1 != NULL)
+  {
+    //se hace PD2 (pin 2) entrada
+    DDRD &= ~(1 << PD2);
+    //se habilta resistencia pull-up en PD2 (opcional)
+    PORTD |= (1 << PD2);
+    //se configura interrupción INT0 para disparos positivos
+    EICRA |= (1 << ISC00);
+    EICRA |= (1 << ISC01);
+    //se habilita interrupción INT0
+    EIMSK |= (1 << INT0);
+    //se habilitan las interrupciones
+    sei();
+  }
+
+//INT SEMAFORO 2
+  //si el semáforo es creado, inicializa interrupción INT1 (PD3)
+  if(interruptSemaphore2 != NULL)
+  {
+    //se hace PD3 (pin 3) entrada
+    DDRD &= ~(1 << PD3);
+    //se habilita resistencia pull-up en PD3 (opcional)
+    PORTD |= (1 << PD3);
+    //se configura interrupción INT1 para disparos positivos
+    EICRA |= (1 << ISC10);
+    EICRA |= (1 << ISC11);
+    //se habilita interrupción INT1
+    EIMSK |= (1 << INT1);
+    //se habilitan las interrupciones
+    sei();
+  }
+
+//INT SEMAFORO 3
+  //si el semáforo es creado, inicializa interrupción PCINT2 (PD7)
+  if(interruptSemaphore3 != NULL)
+  {
+    //se hace PD7 (pin 7) entrada
+    DDRD &= ~(1 << PD7);
+    //se habilita interrupción por cambio de estado en PORTC
+    PCICR |= (1 << PCIE2);
+    //se habilita interrupción PCINT23
+    PCMSK2 |= (1 << PCINT23);
+    //se habilitan las interrupciones
+    sei();
+  }
+
+//INT SEMAFORO 4
+  //si el semáforo es creado, inicializa interrupción PCINT0 (PB4)
+  if(interruptSemaphore4 != NULL)
+  {
+    //se hace PB4 (pin 12) entrada
+    DDRB &= ~(1 << PB4);  
+    //se habilita interrupción por cambio de estado en PORTB
+    PCICR |= (1 << PCIE0);
+    //se habilita interrupción PCINT4
+    PCMSK0 |= (1 << PCINT4);
+    //se habilitan las interrupciones
+    sei();
+  }
+}
+
+//TAREA BARRIDO DE RENGLONES
+void vTaskCERO(void * pvParameters)
+{
+  // Barrido de renglones
+  //renglón 1
+  nf=1;
+  MakeOutputPin(DDRB, PB3); 
+  WriteOutputPinLow(PORTB, PB3);
+  // Regresa el renglón a alta impedancia
+  WriteOutputPinHigh(PORTB, PB3); 
+  MakeInputPin(DDRB, PB3);  
+  _delay_ms(period);
+
+  //renglón 2   
+  nf=2;
+  MakeOutputPin(DDRB, PB2); 
+  WriteOutputPinLow(PORTB, PB2);
+  // Regresa el renglón a alta impedancia
+  WriteOutputPinHigh(PORTB, PB2); 
+  MakeInputPin(DDRB, PB2); 
+  _delay_ms(period);
+  
+  //renglón 3
+  nf=3;
+  MakeOutputPin(DDRB, PB1);  
+  WriteOutputPinLow(PORTB, PB1);
+  // Regresa el renglón a alta impedancia
+  WriteOutputPinHigh(PORTB, PB1); 
+  MakeInputPin(DDRB, PB1);
+  _delay_ms(period);
+  _delay_ms(period);
+
+  //renglón 4  
+  nf=4;
+  MakeOutputPin(DDRB, PB0); 
+  WriteOutputPinLow(PORTB, PB0);
+  // Regresa el renglón a alta impedancia
+  WriteOutputPinHigh(PORTB, PB0); 
+  MakeInputPin(DDRB, PB0);
+  _delay_ms(period);
+  
+}
+
+//TAREA QUE LEE COLUMNA 1
+void vHandlerL1(void *pvParameters)
+{ 
+  while(1)
+  {
+    //espera por siempre al semáforo
+    if (xSemaphoreTakeFromISR(interruptSemaphore1, NULL) == pdPASS) 
+    {
+    switch(nf){
+      case 1:
+        _delay_ms(period);
+        t = '1';
+        break;
+      case 2:
+        _delay_ms(period);
+        t = '4';
+        break;
+      case 3:
+        _delay_ms(period);
+        t = '7';
+        break;
+      case 4:
+        _delay_ms(period);
+        t = '*';
+        break;
+    }
+    sprintf(mybuffer, "%c\n", t);
+    USART_Transmit_String((unsigned char *)mybuffer);
+    }
+  }
+}
+
+//TAREA QUE LEE COLUMNA 2
+void vHandlerL2(void *pvParameters)
+{
+  while(1)
+  {
+    //espera por siempre al semáforo
+    if (xSemaphoreTakeFromISR(interruptSemaphore2, NULL) == pdPASS) 
+    {
+      switch(nf)
+      {
+        case 1:
+          _delay_ms(period);
+          t = '2';
+          break;
+        case 2:
+          _delay_ms(period);
+          t = '5';
+          break;
+        case 3:
+          _delay_ms(period);
+          t = '8';
+          break;
+        case 4:
+          _delay_ms(period);
+          t = '0';
+          break;
+      }
+      sprintf(mybuffer, "%c\n", t);
+      USART_Transmit_String((unsigned char *)mybuffer);
+    }
+    
+  }
+}
+
+//TAREA QUE LEE COLUMNA 3
+void vHandlerL3(void *pvParameters)
+{ 
+  while(1)
+  {
+    //espera por siempre al semáforo
+    if (xSemaphoreTakeFromISR(interruptSemaphore3, NULL) == pdPASS) 
+    {
+      switch(nf)
+      {
+        case 1:
+          _delay_ms(period);
+          t = '3';
+          break;
+        case 2:
+          _delay_ms(period);
+          t = '6';
+          break;
+        case 3:
+          _delay_ms(period);
+          t = '9';
+          break;
+        case 4:
+          _delay_ms(period);
+          t = '#';
+          break;
+      }
+      sprintf(mybuffer, "%c\n", t);
+      USART_Transmit_String((unsigned char *)mybuffer);
+    }
+    
+  }
+}
+
+//TAREA QUE LEE COLUMNA 4
+void vHandlerL4(void *pvParameters)
+{ 
+  while(1)
+  {
+    //espera por siempre al semáforo
+    if (xSemaphoreTakeFromISR(interruptSemaphore4, NULL) == pdPASS) 
+    {
+      switch(nf)
+      {
+        case 1:
+        _delay_ms(period);
+        t = 'A';
+          break;
+        case 2:
+        _delay_ms(period);
+        t = 'B';
+          break;
+        case 3:
+        _delay_ms(period);
+        t = 'C';
+          break;
+        case 4:
+        _delay_ms(period);
+        t = 'D';
+          break;
+      }
+      sprintf(mybuffer, "%c\n", t);
+      USART_Transmit_String((unsigned char *)mybuffer);
+    }
+    
+  }
+}
+
+//ISR 1
+ISR(INT0_vect){ //columna 1 a pin 2 PORT D
+
+  //da el semáforo desde ISR
+  xSemaphoreGiveFromISR(interruptSemaphore1, NULL);
+}
+
+//ISR 2
+ISR(INT1_vect){ //columna 2 a pin 3 PORTD
+
+  //da el semáforo desde ISR
+  xSemaphoreGiveFromISR(interruptSemaphore2, NULL);
+}
+
+//ISR 3
+ISR(PCINT2_vect){ //columna 3 a pin 7 PORTD
+
+  //da el semáforo desde ISR
+  xSemaphoreGiveFromISR(interruptSemaphore3, NULL);
+}
+
+//ISR 4
+ISR(PCINT0_vect){ //columna 4 a pin 12 PORTB
+
+  //da el semáforo desde ISR
+  xSemaphoreGiveFromISR(interruptSemaphore4, NULL);
+}
+
+void loop()
+{
+
+//MANDA A DORMIR EL MICRO
+  //modo power down
+  SMCR |= (1<<SM1); 
+  //desactiva interrupciones
+  cli(); 
+  //habilita sleep           
+  SMCR |= (1<<SE);
+  //habilita interrupciones  
+  sei();
+  //aplica sleep
+  asm("SLEEP");
+  //deshabilita sleep
+  SMCR &= ~(1<<SE);
+}
+
+//////////funciones de transmisión del UART///////////////
+
+void USART_Transmit(unsigned char data)
+{
+  //wait for empty transmit buffer
+  while(!(UCSR0A & (1 << UDRE0)));
+  
+  //put data into buffer, send data
+  UDR0 = data;  
+}
+
+void USART_Transmit_String(unsigned char * pdata)
+{
+  unsigned char i;
+  //calculate string length
+  unsigned char len = strlen(pdata);
+
+  //transmit byte for byte
+  for(i=0; i < len; i++)
+  {
+    //wait for empty transmit buffer
+    while(!(UCSR0A & (1 << UDRE0)));
+    //put data into buffer, send data
+    UDR0 = pdata[i];
+  }
+}
+//////////////////////////////////////////////////////////////
